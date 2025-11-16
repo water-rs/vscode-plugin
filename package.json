@@ -1,0 +1,66 @@
+{
+  "name": "waterui-vscode",
+  "displayName": "WaterUI",
+  "description": "VSCode integration for the WaterUI CLI. List devices, run projects, and package builds without leaving the editor.",
+  "version": "0.1.0",
+  "publisher": "waterui",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:waterui.devices.show",
+    "onCommand:waterui.run",
+    "onCommand:waterui.package",
+    "onCommand:waterui.doctor"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -p ./ -w",
+    "lint": "tsc -p ./ --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "waterui.devices.show",
+        "title": "WaterUI: Show Devices",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.run",
+        "title": "WaterUI: Run Project",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.package",
+        "title": "WaterUI: Package Project",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.doctor",
+        "title": "WaterUI: Diagnose Environment",
+        "category": "WaterUI"
+      }
+    ],
+    "configuration": {
+      "title": "WaterUI",
+      "properties": {
+        "waterui.cliPath": {
+          "type": "string",
+          "default": "water",
+          "description": "Path to the `water` CLI executable. Change this if WaterUI CLI is not on your PATH."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.84.0",
+    "typescript": "^5.6.3"
+  }
+}
