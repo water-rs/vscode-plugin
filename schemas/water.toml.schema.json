@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/water-rs/vscode-plugin/dev/schemas/water.toml.schema.json",
+  "title": "WaterUI project manifest (Water.toml)",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "package": {
+      "type": "object",
+      "required": ["type", "name", "bundle_identifier"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["app", "playground"],
+          "default": "app",
+          "description": "Project mode. `playground` manages platform runners for you; `app` owns real platform projects."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable application name."
+        },
+        "bundle_identifier": {
+          "type": "string",
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$",
+          "description": "Reverse-DNS bundle identifier, e.g. dev.waterui.demo."
+        },
+        "assets_path": {
+          "type": "string",
+          "default": "assets",
+          "description": "Assets directory relative to the project root."
+        },
+        "accessory": {
+          "type": "boolean",
+          "default": false,
+          "description": "Build as an accessory (headless) app on macOS."
+        }
+      }
+    },
+    "waterui_path": {
+      "type": "string",
+      "description": "Path to a local WaterUI checkout; all backends use it instead of published versions (dev mode)."
+    },
+    "backends": {
+      "type": "object",
+      "description": "Per-platform backend configuration.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Base path for all backends, relative to the project root."
+        },
+        "android": { "$ref": "#/definitions/backend" },
+        "apple": { "$ref": "#/definitions/backend" },
+        "gtk4": { "$ref": "#/definitions/backend" },
+        "hydrolysis": { "$ref": "#/definitions/backend" },
+        "esp32": { "$ref": "#/definitions/backend" }
+      },
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "object",
+      "description": "Playground permission declarations.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["enable", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "enable": {
+            "type": "boolean",
+            "description": "Whether this permission is requested."
+          },
+          "description": {
+            "type": "string",
+            "description": "Why this permission is needed (shown to the user)."
+          }
+        }
+      },
+      "propertyNames": {
+        "enum": [
+          "internet",
+          "camera",
+          "microphone",
+          "location",
+          "coarse_location",
+          "storage",
+          "write_storage",
+          "photo_library",
+          "contacts",
+          "calendars",
+          "bluetooth",
+          "bluetooth_admin",
+          "vibrate",
+          "wake_lock"
+        ]
+      }
+    },
+    "app": {
+      "type": "object",
+      "description": "App-mode configuration.",
+      "properties": {
+        "crates": {
+          "type": "object",
+          "description": "Generated crate name overrides.",
+          "properties": {
+            "ffi": { "type": "string" },
+            "gtk": { "type": "string" },
+            "hydrolysis": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "framework": {
+      "type": "object",
+      "description": "Exact framework/backend selection, written by version operations — do not edit by hand."
+    },
+    "theme": {
+      "type": "object",
+      "description": "Cross-platform app theme slots."
+    }
+  },
+  "definitions": {
+    "backend": {
+      "type": "object",
+      "description": "One platform backend entry.",
+      "properties": {
+        "project_path": {
+          "type": "string",
+          "description": "Path to the backend project relative to the project root."
+        },
+        "version": {
+          "type": "string",
+          "description": "Pinned backend version."
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}
