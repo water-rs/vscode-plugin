@@ -1,23 +1,22 @@
 import * as vscode from "vscode";
-import { execFile, spawn, SpawnOptionsWithoutStdio } from "child_process";
-import { promisify } from "util";
-import * as path from "path";
-import * as os from "os";
-import { promises as fs } from "fs";
-
-const execFileAsync = promisify(execFile);
-
-type DeviceKind = "simulator" | "device" | "emulator";
-
-interface DeviceInfo {
-  platform: string;
-  raw_platform?: string;
-  name: string;
-  identifier: string;
-  kind: DeviceKind;
-  state?: string;
-  detail?: string;
-}
+import {
+  ensureWaterCliAvailable,
+  execWater,
+  isCliRequiredMessage,
+  runCliInTerminal,
+} from "./cli";
+import { getOutputChannel } from "./output";
+import {
+  DestinationPicker,
+  DeviceInfo,
+  fetchDevices,
+  promptForDevice,
+} from "./devices";
+import { WaterUITaskProvider, WATERUI_TASK_TYPE } from "./tasks";
+import { createProject } from "./create";
+import { attachInspector } from "./inspector";
+import { registerPreview } from "./preview";
+import { registerWaterTomlSchema } from "./waterToml";
 
 interface DeviceQuickPickItem extends vscode.QuickPickItem {
   device: DeviceInfo | null;
@@ -31,55 +30,37 @@ interface WorkspaceQuickPickItem extends vscode.QuickPickItem {
   folder: vscode.WorkspaceFolder;
 }
 
-type DoctorStatus = "pass" | "warn" | "fail";
-type DoctorRowStatus = DoctorStatus | "info";
+type DoctorRowStatus = "pass" | "warn" | "fail" | "info";
+
+/// One line of `water doctor --json`: the CLI streams check results as JSONL.
+interface DoctorEvent {
+  status?: string;
+  level?: string;
+  message?: string;
+}
 
 interface DoctorReport {
-  status: DoctorStatus;
-  sections: DoctorSection[];
-  suggestions: FixSuggestion[];
-  applied_fixes?: FixApplication[];
+  rows: DoctorEvent[];
+  hasWarnings: boolean;
+  fixableCount: number;
 }
 
-interface DoctorSection {
-  title: string;
-  rows: DoctorRow[];
-}
-
-interface DoctorRow {
-  status: DoctorRowStatus;
-  message: string;
-  detail?: string;
-  indent: number;
-}
-
-interface FixSuggestion {
-  id: string;
-  description: string;
-  command: string[];
-}
-
-type FixApplicationOutcome = "applied" | "skipped" | "failed" | "unavailable";
-
-interface FixApplication {
-  id: string;
-  description: string;
-  command: string[];
-  outcome: FixApplicationOutcome;
-  detail?: string;
-}
-
-let outputChannel: vscode.OutputChannel | undefined;
 const viewTraitSemanticLegend = new vscode.SemanticTokensLegend(["type"], []);
 
 export function activate(context: vscode.ExtensionContext) {
+  const destinationPicker = new DestinationPicker(context);
+
   const showDevicesDisposable = vscode.commands.registerCommand(
     "waterui.devices.show",
     showDevices
   );
+  const destinationDisposable = vscode.commands.registerCommand(
+    "waterui.destination.pick",
+    () => destinationPicker.pick()
+  );
   const runDisposable = vscode.commands.registerCommand(
     "waterui.run",
-    runProject
+    () => runProject(destinationPicker)
   );
   const packageDisposable = vscode.commands.registerCommand(
     "waterui.package",
@@ -89,32 +70,46 @@ export function activate(context: vscode.ExtensionContext) {
     "waterui.doctor",
     runDoctor
   );
+  const createDisposable = vscode.commands.registerCommand(
+    "waterui.create",
+    createProject
+  );
+  const inspectorDisposable = vscode.commands.registerCommand(
+    "waterui.inspector.attach",
+    attachInspector
+  );
+
+  const taskProvider = vscode.tasks.registerTaskProvider(
+    WATERUI_TASK_TYPE,
+    new WaterUITaskProvider()
+  );
 
   const semanticTokensProvider =
     vscode.languages.registerDocumentSemanticTokensProvider(
-      { language: "rust" },
+      { language: "rust", scheme: "file" },
       new ViewTraitSemanticTokensProvider(),
       viewTraitSemanticLegend
     );
 
   context.subscriptions.push(
+    destinationPicker,
     showDevicesDisposable,
+    destinationDisposable,
     runDisposable,
     packageDisposable,
     doctorDisposable,
-    semanticTokensProvider
+    createDisposable,
+    inspectorDisposable,
+    taskProvider,
+    semanticTokensProvider,
+    ...registerPreview(context)
   );
+
+  void registerWaterTomlSchema(context);
 }
 
 export function deactivate() {
   // no-op
-}
-
-function getOutputChannel(): vscode.OutputChannel {
-  if (!outputChannel) {
-    outputChannel = vscode.window.createOutputChannel("WaterUI");
-  }
-  return outputChannel;
 }
 
 async function showDevices() {
@@ -182,34 +177,47 @@ async function showDevices() {
   }
 }
 
-async function runProject() {
+async function runProject(destinationPicker: DestinationPicker) {
   const workspaceFolder = await pickWorkspaceFolder();
   if (!workspaceFolder) {
     return;
   }
 
-  let selectedDevice: DeviceInfo | null | undefined;
-  try {
-    const devices = await fetchDevices();
-    selectedDevice = await promptForDevice(devices, true);
-    if (selectedDevice === undefined) {
-      return;
+  const stored = destinationPicker.current();
+  let platformArg: string | undefined;
+  let deviceArg: string | undefined;
+
+  if (stored) {
+    platformArg = stored.platform;
+    deviceArg = stored.deviceId;
+  } else {
+    let selectedDevice: DeviceInfo | null | undefined;
+    try {
+      const devices = await fetchDevices();
+      selectedDevice = await promptForDevice(devices, true);
+      if (selectedDevice === undefined) {
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isCliRequiredMessage(message)) {
+        vscode.window.showErrorMessage(message);
+        return;
+      }
+      const proceed = await vscode.window.showWarningMessage(
+        `WaterUI: Unable to list devices (${message}). Continue and let the CLI prompt for a target?`,
+        "Continue",
+        "Cancel"
+      );
+      if (proceed !== "Continue") {
+        return;
+      }
+      selectedDevice = null;
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (isCliRequiredMessage(message)) {
-      vscode.window.showErrorMessage(message);
-      return;
+    if (selectedDevice) {
+      platformArg = selectedDevice.platform;
+      deviceArg = selectedDevice.identifier;
     }
-    const proceed = await vscode.window.showWarningMessage(
-      `WaterUI: Unable to list devices (${message}). Continue and let the CLI prompt for a target?`,
-      "Continue",
-      "Cancel"
-    );
-    if (proceed !== "Continue") {
-      return;
-    }
-    selectedDevice = null;
   }
 
   const buildSelection = await vscode.window.showQuickPick<
@@ -234,8 +242,11 @@ async function runProject() {
   }
 
   const args = ["run", "--project", workspaceFolder.uri.fsPath];
-  if (selectedDevice) {
-    args.push("--device", selectedDevice.identifier);
+  if (platformArg) {
+    args.push("--platform", platformArg);
+  }
+  if (deviceArg) {
+    args.push("--device", deviceArg);
   }
   if (buildSelection.value === "release") {
     args.push("--release");
@@ -340,20 +351,14 @@ async function maybeHandleDoctorSuggestions(
   workspaceFolder: vscode.WorkspaceFolder | undefined,
   cwd: string | undefined
 ) {
-  if (!report.suggestions.length || report.status === "pass") {
-    const toast = `WaterUI doctor status: ${report.status.toUpperCase()}`;
-    if (report.status === "pass") {
-      vscode.window.showInformationMessage(toast);
-    } else {
-      vscode.window.showWarningMessage(toast);
-    }
+  if (!report.hasWarnings) {
+    vscode.window.showInformationMessage("WaterUI doctor: all checks passed.");
     return;
   }
 
   const action = await vscode.window.showWarningMessage(
-    "WaterUI doctor found toolchain issues. Run automatic fixes?",
+    `WaterUI doctor found ${report.fixableCount || "some"} issues needing attention.`,
     "Apply Fixes",
-    "Copy Fix Commands",
     "Dismiss"
   );
   if (action === "Apply Fixes") {
@@ -372,43 +377,55 @@ async function maybeHandleDoctorSuggestions(
         `WaterUI doctor failed to apply fixes. ${message}`
       );
     }
-    return;
   }
+}
 
-  if (action === "Copy Fix Commands") {
-    const commands = report.suggestions
-      .map((suggestion) => suggestion.command.join(" "))
-      .filter((command) => command.length > 0);
-    if (!commands.length) {
-      vscode.window.showInformationMessage(
-        "Doctor suggestions do not include runnable commands."
-      );
-      return;
-    }
-    await vscode.env.clipboard.writeText(commands.join("\n"));
-    vscode.window.showInformationMessage(
-      "WaterUI doctor fix commands copied to clipboard."
-    );
+function doctorRowStatus(row: DoctorEvent): DoctorRowStatus {
+  if (row.status === "✓") {
+    return "pass";
   }
+  if (row.level === "warning" || row.level === "warn") {
+    return "warn";
+  }
+  if (row.level === "error") {
+    return "fail";
+  }
+  return "info";
 }
 
 async function getDoctorReport(
   applyFixes: boolean,
   cwd: string | undefined
 ): Promise<DoctorReport> {
-  const args = ["--json", "doctor"];
+  const args = ["doctor", "--json"];
   if (applyFixes) {
     args.push("--fix");
   }
   const stdout = await execWater(args, cwd);
-  try {
-    return JSON.parse(stdout) as DoctorReport;
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+  const rows: DoctorEvent[] = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) {
+      continue;
+    }
+    try {
+      rows.push(JSON.parse(trimmed) as DoctorEvent);
+    } catch {
+      // non-JSON line, skip
+    }
+  }
+  if (!rows.length) {
     throw new Error(
-      `Failed to parse WaterUI doctor JSON output. ${reason}. Please ensure you are running the latest CLI.`
+      "No JSON events in `water doctor` output — is this a recent CLI?"
     );
   }
+  const fixableCount = rows.filter((row) =>
+    row.message?.includes("[fixable]")
+  ).length;
+  const hasWarnings = rows.some(
+    (row) => doctorRowStatus(row) === "warn" || doctorRowStatus(row) === "fail"
+  );
+  return { rows, hasWarnings, fixableCount };
 }
 
 function displayDoctorReport(
@@ -421,71 +438,23 @@ function displayDoctorReport(
     ? `workspace "${workspaceFolder.name}"`
     : "current environment";
   channel.appendLine(`WaterUI doctor report (${workspaceLabel})`);
-  channel.appendLine(
-    `Status: ${statusIcon(report.status)} ${report.status.toUpperCase()}`
-  );
   channel.appendLine("");
 
-  for (const section of report.sections) {
-    const sectionStatus = summarizeSectionStatus(section);
-    channel.appendLine(
-      `${statusIcon(sectionStatus)} ${section.title} [${sectionStatus.toUpperCase()}]`
-    );
-    for (const row of section.rows) {
-      const indent = "  ".repeat(row.indent + 1);
-      channel.appendLine(
-        `${indent}${statusIcon(row.status)} ${row.message.trim()}`
-      );
-      if (row.detail) {
-        const detailIndent = "  ".repeat(row.indent + 2);
-        channel.appendLine(`${detailIndent}${row.detail.trim()}`);
-      }
-    }
-    channel.appendLine("");
+  for (const row of report.rows) {
+    const status = doctorRowStatus(row);
+    channel.appendLine(`${statusIcon(status)} ${row.message?.trim() ?? ""}`);
   }
 
-  if (report.applied_fixes && report.applied_fixes.length) {
-    channel.appendLine("Applied fixes:");
-    for (const fix of report.applied_fixes) {
-      channel.appendLine(
-        `- ${fix.description} (${fix.outcome.toUpperCase()})${
-          fix.detail ? ` — ${fix.detail}` : ""
-        }`
-      );
-    }
-    channel.appendLine("");
-  }
-
-  if (report.suggestions.length) {
-    channel.appendLine("Fix suggestions:");
-    for (const suggestion of report.suggestions) {
-      const commandPreview = suggestion.command.join(" ");
-      channel.appendLine(`- ${suggestion.description}`);
-      if (commandPreview.length) {
-        channel.appendLine(`    ${commandPreview}`);
-      }
-    }
-  } else {
-    channel.appendLine("No fix suggestions required.");
-  }
-
+  channel.appendLine("");
+  channel.appendLine(
+    report.hasWarnings
+      ? `${report.fixableCount} fixable issue(s) — re-run with --fix to apply.`
+      : "All checks passed."
+  );
   channel.show(true);
 }
 
-function summarizeSectionStatus(section: DoctorSection): DoctorRowStatus {
-  if (section.rows.some((row) => row.status === "fail")) {
-    return "fail";
-  }
-  if (section.rows.some((row) => row.status === "warn")) {
-    return "warn";
-  }
-  if (section.rows.some((row) => row.status === "pass")) {
-    return "pass";
-  }
-  return "info";
-}
-
-function statusIcon(status: DoctorRowStatus | DoctorStatus): string {
+function statusIcon(status: DoctorRowStatus): string {
   switch (status) {
     case "pass":
       return "✔";
@@ -496,65 +465,6 @@ function statusIcon(status: DoctorRowStatus | DoctorStatus): string {
     default:
       return "•";
   }
-}
-
-async function fetchDevices(): Promise<DeviceInfo[]> {
-  const stdout = await execWater(["--json", "devices"]);
-  try {
-    const parsed = JSON.parse(stdout.trim() || "[]");
-    if (Array.isArray(parsed)) {
-      return parsed as DeviceInfo[];
-    }
-    return [];
-  } catch (error) {
-    throw new Error(
-      `Unable to parse CLI response: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    );
-  }
-}
-
-async function promptForDevice(
-  devices: DeviceInfo[],
-  includeAuto: boolean
-): Promise<DeviceInfo | null | undefined> {
-  if (!devices.length && !includeAuto) {
-    vscode.window.showWarningMessage("WaterUI: No devices available.");
-    return undefined;
-  }
-
-  const items: DeviceQuickPickItem[] = [];
-  if (includeAuto) {
-    items.push({
-      label: "Let WaterUI choose",
-      description: "The CLI will prompt for a device if needed",
-      device: null,
-    });
-  }
-  for (const device of devices) {
-    items.push({
-      label: device.name,
-      description: `${device.platform} • ${device.kind}`,
-      detail:
-        [device.identifier, device.state, device.detail]
-          .filter(Boolean)
-          .join(" | ") || undefined,
-      device,
-    });
-  }
-
-  if (!items.length) {
-    vscode.window.showWarningMessage(
-      "WaterUI: No devices detected. Connect a device or start a simulator."
-    );
-    return undefined;
-  }
-
-  const selection = await vscode.window.showQuickPick(items, {
-    placeHolder: "Select a device to run on",
-  });
-  return selection?.device;
 }
 
 async function pickWorkspaceFolder(): Promise<
@@ -581,214 +491,6 @@ async function pickWorkspaceFolder(): Promise<
   );
 
   return selection?.folder;
-}
-
-async function execWater(args: string[], cwd?: string): Promise<string> {
-  const command = getCliPath();
-  try {
-    const { stdout } = await execFileAsync(command, args, {
-      cwd,
-      env: process.env,
-      windowsHide: true,
-    });
-    return stdout.toString();
-  } catch (error) {
-    if (isMissingCliError(error)) {
-      const installed = await promptInstallCli();
-      if (installed) {
-        return execWater(args, cwd);
-      }
-      throw new Error("WaterUI CLI is required. Install it and try again.");
-    }
-    const err = error as { stderr?: string; message?: string };
-    const stderr = err.stderr?.toString().trim();
-    throw new Error(stderr || err.message || "Water CLI command failed.");
-  }
-}
-
-function getCliPath(): string {
-  const configuration = vscode.workspace.getConfiguration("waterui");
-  const cliPath = configuration.get<string>("cliPath")?.trim();
-  return cliPath && cliPath.length > 0 ? cliPath : "water";
-}
-
-function runCliInTerminal(name: string, args: string[], cwd?: string) {
-  const cliPath = getCliPath();
-  const command = [quoteArg(cliPath), ...args.map(quoteArg)].join(" ");
-  const terminal = vscode.window.createTerminal({ name, cwd });
-  terminal.show(true);
-  terminal.sendText(command, true);
-}
-
-function quoteArg(value: string): string {
-  if (/^[\w@%+=:,./-]+$/i.test(value)) {
-    return value;
-  }
-  const escaped = value.replace(/(["\\$`])/g, "\\$1");
-  return `"${escaped}"`;
-}
-
-function isMissingCliError(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-  const err = error as { code?: string | number; message?: string };
-  if (err.code === "ENOENT") {
-    return true;
-  }
-  const message = (err.message || "").toLowerCase();
-  return (
-    message.includes("not found") || message.includes("could not be spawned")
-  );
-}
-
-function isCliRequiredMessage(message: string): boolean {
-  return message.toLowerCase().includes("waterui cli is required");
-}
-
-async function ensureWaterCliAvailable(): Promise<boolean> {
-  try {
-    await execWater(["--version"]);
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(message);
-    return false;
-  }
-}
-
-async function promptInstallCli(): Promise<boolean> {
-  const selection = await vscode.window.showInformationMessage(
-    "WaterUI CLI (water) was not found. Would you like to install it now?",
-    { modal: true },
-    "Stable Install",
-    "Dev Install"
-  );
-  if (!selection) {
-    return false;
-  }
-  if (selection === "Stable Install") {
-    return installCliStable();
-  }
-  if (selection === "Dev Install") {
-    return installCliDev();
-  }
-  return false;
-}
-
-async function installCliStable(): Promise<boolean> {
-  const channel = getOutputChannel();
-  channel.show(true);
-  try {
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: "Installing WaterUI CLI (stable)",
-      },
-      async () => {
-        channel.appendLine("> cargo install waterui-cli");
-        await runCommandWithOutput(
-          "cargo",
-          ["install", "waterui-cli"],
-          {},
-          channel
-        );
-      }
-    );
-    vscode.window.showInformationMessage(
-      "WaterUI CLI installed successfully (stable)."
-    );
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(
-      `Failed to install WaterUI CLI (stable). ${message}`
-    );
-    return false;
-  }
-}
-
-async function installCliDev(): Promise<boolean> {
-  const channel = getOutputChannel();
-  channel.show(true);
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "waterui-cli-"));
-  const repoDir = path.join(tempRoot, "waterui");
-
-  try {
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: "Installing WaterUI CLI (dev)",
-      },
-      async () => {
-        channel.appendLine(
-          `> git clone --branch dev --depth 1 https://github.com/water-rs/waterui.git ${repoDir}`
-        );
-        await runCommandWithOutput(
-          "git",
-          [
-            "clone",
-            "--branch",
-            "dev",
-            "--depth",
-            "1",
-            "https://github.com/water-rs/waterui.git",
-            repoDir,
-          ],
-          {},
-          channel
-        );
-        const cliDir = path.join(repoDir, "cli");
-        channel.appendLine(`> cargo install --path ${cliDir}`);
-        await runCommandWithOutput(
-          "cargo",
-          ["install", "--path", cliDir],
-          {},
-          channel
-        );
-      }
-    );
-    vscode.window.showInformationMessage(
-      "WaterUI CLI installed successfully (dev)."
-    );
-    return true;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    vscode.window.showErrorMessage(
-      `Failed to install WaterUI CLI (dev). ${message}`
-    );
-    return false;
-  } finally {
-    await fs
-      .rm(tempRoot, { recursive: true, force: true })
-      .catch(() => undefined);
-  }
-}
-
-function runCommandWithOutput(
-  command: string,
-  args: string[],
-  options: SpawnOptionsWithoutStdio,
-  channel: vscode.OutputChannel
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      ...options,
-      env: process.env,
-    });
-
-    child.stdout?.on("data", (data) => channel.append(data.toString()));
-    child.stderr?.on("data", (data) => channel.append(data.toString()));
-
-    child.on("error", (error) => reject(error));
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`${command} exited with code ${code}`));
-      }
-    });
-  });
 }
 
 class ViewTraitSemanticTokensProvider

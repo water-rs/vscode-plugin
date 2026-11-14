@@ -1,7 +1,7 @@
 {
   "name": "waterui-vscode",
   "displayName": "WaterUI",
-  "description": "VSCode integration for the WaterUI CLI. List devices, run projects, and package builds without leaving the editor.",
+  "description": "VSCode integration for the WaterUI CLI. Devices, run/package, previews, inspector, and project scaffolding without leaving the editor.",
   "version": "0.1.0",
   "publisher": "waterui",
   "license": "SEE LICENSE IN ../../LICENSE",
@@ -15,7 +15,18 @@
     "onCommand:waterui.devices.show",
     "onCommand:waterui.run",
     "onCommand:waterui.package",
-    "onCommand:waterui.doctor"
+    "onCommand:waterui.doctor",
+    "onCommand:waterui.create",
+    "onCommand:waterui.destination.pick",
+    "onCommand:waterui.inspector.attach",
+    "onCommand:waterui.preview.open",
+    "onCommand:waterui.preview.showFor",
+    "onCommand:waterui.preview.snapshot",
+    "onCommand:waterui.preview.test",
+    "onCommand:waterui.preview.refresh",
+    "onCommand:waterui.preview.pickTarget",
+    "onLanguage:rust",
+    "workspaceContains:**/Water.toml"
   ],
   "main": "./dist/extension.js",
   "scripts": {
@@ -32,6 +43,11 @@
         "category": "WaterUI"
       },
       {
+        "command": "waterui.destination.pick",
+        "title": "WaterUI: Select Run Destination",
+        "category": "WaterUI"
+      },
+      {
         "command": "waterui.run",
         "title": "WaterUI: Run Project",
         "category": "WaterUI"
@@ -45,6 +61,31 @@
         "command": "waterui.doctor",
         "title": "WaterUI: Diagnose Environment",
         "category": "WaterUI"
+      },
+      {
+        "command": "waterui.create",
+        "title": "WaterUI: New Project",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.inspector.attach",
+        "title": "WaterUI: Attach Inspector",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.preview.open",
+        "title": "WaterUI: Open Preview",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.preview.refresh",
+        "title": "WaterUI: Refresh Preview",
+        "category": "WaterUI"
+      },
+      {
+        "command": "waterui.preview.pickTarget",
+        "title": "WaterUI: Select Preview Target",
+        "category": "WaterUI"
       }
     ],
     "configuration": {
@@ -54,9 +95,75 @@
           "type": "string",
           "default": "water",
           "description": "Path to the `water` CLI executable. Change this if WaterUI CLI is not on your PATH."
+        },
+        "waterui.preview.platform": {
+          "type": "string",
+          "enum": ["", "ios", "macos", "android"],
+          "default": "",
+          "description": "Target platform passed to `water preview` (empty = CLI default)."
+        },
+        "waterui.preview.backend": {
+          "type": "string",
+          "enum": ["", "apple", "android", "hydrolysis"],
+          "default": "",
+          "description": "Rendering backend passed to `water preview` (empty = CLI default)."
+        },
+        "waterui.preview.frame": {
+          "type": "string",
+          "default": "375x667",
+          "pattern": "^[0-9]+x[0-9]+$",
+          "description": "Frame size for preview renders, WIDTHxHEIGHT."
+        },
+        "waterui.preview.refreshOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-render the preview panel when a Rust file in the project is saved."
+        },
+        "waterui.tomlSchema.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Associate the bundled Water.toml schema with Even Better TOML when it is installed."
         }
       }
-    }
+    },
+    "taskDefinitions": [
+      {
+        "type": "waterui",
+        "required": ["command"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": ["run", "package", "preview", "test", "doctor", "devices"],
+            "description": "The water subcommand to invoke (`test` maps to `water preview test`)."
+          },
+          "platform": {
+            "type": "string",
+            "description": "Target platform, e.g. ios, android, macos, linux, windows, web, esp32s3."
+          },
+          "backend": {
+            "type": "string",
+            "description": "Backend override for the platform."
+          },
+          "device": {
+            "type": "string",
+            "description": "Device identifier passed to --device."
+          },
+          "release": {
+            "type": "boolean",
+            "description": "Pass --release."
+          },
+          "target": {
+            "type": "string",
+            "description": "Positional target (e.g. a preview function path)."
+          },
+          "args": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Extra arguments appended verbatim."
+          }
+        }
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^18.19.0",
